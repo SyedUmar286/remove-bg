@@ -30,11 +30,9 @@
                 <span id="brushVal" class="text-sm bg-slate-800 px-2 py-1 rounded">20px</span>
             </div>
 
-            <button id="clearBtn" class="bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition">
-                Reset Mask
-            </button>
+            <button id="clearBtn" class="bg-red-600 hover:bg-red-700 text-white font-medium py-2 px-4 rounded-lg transition">Reset</button>
             <button id="removeBtn" class="bg-gradient-to-r from-green-500 to-emerald-600 hover:from-green-600 hover:to-emerald-700 text-white font-bold py-2 px-6 rounded-lg shadow-lg transition">
-                Remove Object
+                <span id="btnText">Remove Object</span>
             </button>
         </div>
 
@@ -42,7 +40,7 @@
             <canvas id="editorCanvas" class="max-w-full h-auto shadow-md rounded-lg hidden"></canvas>
             <div id="placeholderText" class="text-gray-500 text-center">
                 <p class="text-lg">No image uploaded yet</p>
-                <p class="text-sm text-gray-600">Please upload a high-quality picture to start editing.</p>
+                <p class="text-sm text-gray-600">Upload a picture and rub the area you want to erase.</p>
             </div>
         </div>
     </main>
@@ -55,19 +53,22 @@
         const brushSizeInput = document.getElementById('brushSize');
         const brushVal = document.getElementById('brushVal');
         const clearBtn = document.getElementById('clearBtn');
+        const removeBtn = document.getElementById('removeBtn');
+        const btnText = document.getElementById('btnText');
 
         let img = new Image();
         let isDrawing = false;
         let brushSize = 20;
+        
+        // Ek alag canvas background mein mask record karne ke liye
+        let maskCanvas = document.createElement('canvas');
+        let maskCtx = maskCanvas.getContext('2d');
 
-        // 1. Handle Image Upload
         upload.addEventListener('change', (e) => {
             const file = e.target.files[0];
             if (file) {
                 const reader = new FileReader();
-                reader.onload = (event) => {
-                    img.src = event.target.result;
-                };
+                reader.onload = (event) => { img.src = event.target.result; };
                 reader.readAsDataURL(file);
             }
         });
@@ -75,46 +76,105 @@
         img.onload = () => {
             canvas.width = img.width;
             canvas.height = img.height;
+            maskCanvas.width = img.width;
+            maskCanvas.height = img.height;
+            
             ctx.drawImage(img, 0, 0);
+            
+            // Mask ko shuru mein pura black kar do (Black matlab safe area)
+            maskCtx.fillStyle = "black";
+            maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+
             canvas.classList.remove('hidden');
             placeholder.classList.add('hidden');
         };
 
-        // 2. Brush Size Control
         brushSizeInput.addEventListener('input', (e) => {
             brushSize = e.target.value;
             brushVal.textContent = brushSize + 'px';
         });
 
-        // 3. Drawing / Masking Logic (Where user rubs the mouse)
         canvas.addEventListener('mousedown', (e) => { isDrawing = true; draw(e); });
         canvas.addEventListener('mousemove', draw);
-        canvas.addEventListener('mouseup', () => isDrawing = false);
-        canvas.addEventListener('mouseleave', () => isDrawing = false);
+        canvas.addEventListener('mouseup', () => { isDrawing = false; ctx.beginPath(); maskCtx.beginPath(); });
 
         function draw(e) {
             if (!isDrawing) return;
 
             const rect = canvas.getBoundingClientRect();
-            // Scale points correctly matching canvas resolution
             const x = (e.clientX - rect.left) * (canvas.width / rect.width);
             const y = (e.clientY - rect.top) * (canvas.height / rect.height);
 
+            // Screen par dikhane ke liye (Red brush)
             ctx.lineWidth = brushSize;
             ctx.lineCap = 'round';
-            ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)'; // Transparent Red for selection highlight
-
+            ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
             ctx.lineTo(x, y);
             ctx.stroke();
-            ctx.beginPath();
-            ctx.moveTo(x, y);
+
+            // AI ke samajhne ke liye (White brush - AI sirf white area remove karta hai)
+            maskCtx.lineWidth = brushSize;
+            maskCtx.lineCap = 'round';
+            maskCtx.strokeStyle = 'white';
+            maskCtx.lineTo(x, y);
+            maskCtx.stroke();
         }
 
-        // Reset Mask Button
         clearBtn.addEventListener('click', () => {
             if(img.src) {
                 ctx.clearRect(0, 0, canvas.width, canvas.height);
                 ctx.drawImage(img, 0, 0);
+                maskCtx.fillStyle = "black";
+                maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+            }
+        });
+
+        // 🔥 ASLI AI REMOVE LOGIC START HERE 🔥
+        removeBtn.addEventListener('click', async () => {
+            if (!img.src) return alert("Pehle image upload karein!");
+            
+            btnText.textContent = "Erasing Object... Please wait...";
+            removeBtn.disabled = true;
+
+            try {
+                // Canvas ko image blobs mein convert karna
+                const imageBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg'));
+                const maskBlob = await new Promise(resolve => maskCanvas.toBlob(resolve, 'image/jpeg'));
+
+                const formData = new FormData();
+                formData.append("image", imageBlob);
+                formData.append("mask", maskBlob);
+
+                // Hugging Face ki Free Inpainting AI API ko call karna
+                const response = await fetch("https://api-inference.huggingface.co/models/SberbankAI/Kandinsky-2.2-Inpainting", {
+                    method: "POST",
+                    headers: { "Authorization": "Bearer hf_MvXvXvXvXvXvXvXvXvXvXvXvXvXvXvXvXv" }, // Demo Token (For production, use your own free token)
+                    body: formData
+                });
+
+                if (!response.ok) throw new Error("AI Processing failed.");
+
+                const resultBlob = await response.blob();
+                const resultUrl = URL.createObjectURL(resultBlob);
+                
+                // New Image ko main canvas par load karna
+                let resultImg = new Image();
+                resultImg.onload = () => {
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(resultImg, 0, 0);
+                    // Mask reset karein taaki naye siray se remove kiya ja sake
+                    maskCtx.fillStyle = "black";
+                    maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+                    btnText.textContent = "Remove Object";
+                    removeBtn.disabled = false;
+                };
+                resultImg.src = resultUrl;
+
+            } catch (error) {
+                console.error(error);
+                alert("Ek dafa phir koshish karein ya apna free Hugging Face Token lagayein.");
+                btnText.textContent = "Remove Object";
+                removeBtn.disabled = false;
             }
         });
     </script>
